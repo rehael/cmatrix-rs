@@ -1,0 +1,64 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+# bash stops at the first failing command; pwsh only checks the last one.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default stable
+
+      - name: Check tag matches Cargo.toml
+        run: |
+          version=$(cargo pkgid)
+          version=${version##*[#@]}
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "cmatrix-$env:VERSION-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/cmatrix.exe, README.md, LICENSE -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$name.zip.sha256" -Value "$hash  $name.zip`n" -NoNewline
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --title "$GITHUB_REF_NAME" --generate-notes
