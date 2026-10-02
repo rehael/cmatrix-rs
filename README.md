@@ -11,6 +11,8 @@ cargo build --release   # produces cmatrix.exe
 cargo test
 ```
 
+Releases are built by GitHub Actions from version tags; see [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Usage
 
 ```text
@@ -46,3 +48,25 @@ Windows 10 or later. Windows Terminal is the target and the only console tested;
 ## License
 
 [MIT No Attribution (MIT-0)](LICENSE). Copyright 2026 Marcin W. Dąbrowski.
+
+### Why MIT-0 and not cmatrix's GPL-3.0
+
+cmatrix is licensed under GPL-3.0-or-later. The GPL governs copies and adaptations of cmatrix. cmatrix-rs is neither, so its author is free to choose its licence. This section records the reasoning; it is not legal advice.
+
+What cmatrix-rs shares with cmatrix:
+
+- the visual concept: columns of falling glyphs with a bright leading glyph;
+- part of the command-line interface: options `-C`, `-M`, `-r`, `-s`, `-u` and the runtime keys.
+
+What it does not share: source code, data tables and text. cmatrix's source was read to understand its behaviour. The Rust code was written separately and has a different design (time-based simulation, diff rendering, direct Win32 console calls). The glyph set is the Unicode half-width katakana block, not cmatrix's list.
+
+Legal basis:
+
+- **GPL-3.0, section 0.** A "modified version" is a work made by copying from or adapting the original "in a fashion requiring copyright permission". Nothing in cmatrix-rs required that permission, so the GPL's conditions do not attach.
+- **EU, Directive 2009/24/EC, Article 1(2):** "Ideas and principles which underlie any element of a computer program, including those which underlie its interfaces, are not protected by copyright under this Directive."
+- **EU, CJEU, C-406/10 *SAS Institute v World Programming*, ECLI:EU:C:2012:259 (2 May 2012):** "Neither the functionality of a computer program nor the programming language and the format of data files used in a computer program in order to exploit certain of its functions constitute a form of expression of that program" and they are not protected by copyright.
+- **Poland, Act of 4 February 1994 on Copyright and Related Rights, Article 74(2):** protection covers all forms of a program's expression; ideas and principles underlying any element of a program, including its interfaces, are not protected.
+- **US, 17 U.S.C. §102(b):** copyright does not extend to "any idea, procedure, process, system, method of operation, concept, principle, or discovery".
+- **US, *Google LLC v. Oracle America, Inc.*, No. 18-956 (5 April 2021):** copying the Java SE interface declarations, limited to what was needed to let programmers use their existing skills in a new program, was fair use as a matter of law. Google copied about 11,500 lines of code; cmatrix-rs copies none.
+
+Personal reason: the author wants this code to be as free as possible. Anyone may use, change and redistribute it, in open or closed projects, with no obligations and no attribution required. Copyleft ("viral") licences such as the GPL require every derived work to carry the same licence; MIT-0 places no condition on its users.
