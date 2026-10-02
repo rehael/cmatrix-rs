@@ -1,0 +1,18 @@
+[package]
+name = "cmatrix-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Matrix digital rain for Windows Terminal, inspired by cmatrix"
+license = "MIT-0"
+repository = "https://github.com/rehael/cmatrix-rs"
+
+[[bin]]
+name = "cmatrix"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
