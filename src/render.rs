@@ -5,21 +5,38 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use crate::rain::Rain;
+use crate::typer::{TextFrame, char_width};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Glyph {
     pub ch: char,
     pub rgb: [u8; 3],
     pub bold: bool,
+    pub bg: [u8; 3],
+    /// Underline colour; `None` is no underline.
+    pub ul: Option<[u8; 3]>,
 }
 
-pub const BLANK: Glyph = Glyph {
-    ch: ' ',
-    rgb: [0; 3],
-    bold: false,
-};
+impl Glyph {
+    pub const fn new(ch: char, rgb: [u8; 3], bold: bool) -> Self {
+        Self {
+            ch,
+            rgb,
+            bold,
+            bg: BLACK,
+            ul: None,
+        }
+    }
+}
+
+const BLACK: [u8; 3] = [0; 3];
+pub const BLANK: Glyph = Glyph::new(' ', BLACK, false);
+/// Right half of a two-cell character; the terminal draws it, so it is never sent.
+const WIDE_TAIL: char = '\0';
 
 const MESSAGE_RGB: [u8; 3] = [0xF0; 3];
+/// Brightness of the rain behind the `-F` box.
+const BOX_DIM: f32 = 0.25;
 /// Brightness steps; quantising keeps slow fades from resending a cell every frame.
 const LEVELS: f32 = 32.0;
 /// Synchronized output (DEC mode 2026): the terminal presents each frame whole.
@@ -32,6 +49,11 @@ pub struct Screen {
     /// What the terminal shows; `None` = unknown.
     front: Vec<Option<Glyph>>,
     clear: bool,
+    /// Terminal colour state carried between frames: foreground with weight,
+    /// underline, background.
+    pen: Option<([u8; 3], bool)>,
+    pen_ul: Option<[u8; 3]>,
+    pen_bg: [u8; 3],
     buf: String,
 }
 
@@ -42,6 +64,9 @@ impl Screen {
             back: Vec::new(),
             front: Vec::new(),
             clear: true,
+            pen: None,
+            pen_ul: None,
+            pen_bg: BLACK,
             buf: String::new(),
         };
         screen.resize(width, height);
@@ -74,27 +99,55 @@ impl Screen {
             // Erase paints with the current background, giving a black canvas.
             buf.push_str("\x1b[0m\x1b[48;2;0;0;0m\x1b[2J");
             self.front.fill(Some(BLANK));
+            self.pen = None;
+            self.pen_ul = None;
+            self.pen_bg = BLACK;
             self.clear = false;
         }
-        let mut pen = None;
         let mut cursor = None;
         for (i, (&glyph, shown)) in self.back.iter().zip(self.front.iter_mut()).enumerate() {
             if *shown == Some(glyph) {
+                continue;
+            }
+            *shown = Some(glyph);
+            if glyph.ch == WIDE_TAIL {
                 continue;
             }
             let (x, y) = (i % self.width, i / self.width);
             if cursor != Some((x, y)) {
                 _ = write!(buf, "\x1b[{};{}H", y + 1, x + 1);
             }
-            if glyph.ch != ' ' && pen != Some((glyph.rgb, glyph.bold)) {
-                let [r, g, b] = glyph.rgb;
-                let weight = if glyph.bold { 1 } else { 22 };
-                _ = write!(buf, "\x1b[{weight};38;2;{r};{g};{b}m");
-                pen = Some((glyph.rgb, glyph.bold));
+            let fg = glyph.ch != ' ' && self.pen != Some((glyph.rgb, glyph.bold));
+            let ul = self.pen_ul != glyph.ul;
+            let bg = self.pen_bg != glyph.bg;
+            if fg || ul || bg {
+                buf.push_str("\x1b[");
+                let mut sep = "";
+                if fg {
+                    let [r, g, b] = glyph.rgb;
+                    let weight = if glyph.bold { 1 } else { 22 };
+                    _ = write!(buf, "{weight};38;2;{r};{g};{b}");
+                    self.pen = Some((glyph.rgb, glyph.bold));
+                    sep = ";";
+                }
+                if ul {
+                    // Underline colour uses the colon form (ITU T.416), as Windows Terminal documents it.
+                    match glyph.ul {
+                        Some([r, g, b]) => _ = write!(buf, "{sep}4;58:2::{r}:{g}:{b}"),
+                        None => _ = write!(buf, "{sep}24"),
+                    }
+                    self.pen_ul = glyph.ul;
+                    sep = ";";
+                }
+                if bg {
+                    let [r, g, b] = glyph.bg;
+                    _ = write!(buf, "{sep}48;2;{r};{g};{b}");
+                    self.pen_bg = glyph.bg;
+                }
+                buf.push('m');
             }
             buf.push(glyph.ch);
-            *shown = Some(glyph);
-            cursor = Some((x + 1, y));
+            cursor = Some((x + char_width(glyph.ch), y));
         }
         if buf.len() == BEGIN_FRAME.len() {
             return Ok(());
@@ -105,13 +158,14 @@ impl Screen {
     }
 }
 
-/// Draws the rain (and optional message) into the back buffer.
+/// Draws the rain, then the `-F` text box or the `-M` message, into the back buffer.
 pub fn compose(
     screen: &mut Screen,
     rain: &Rain,
     rgb: [u8; 3],
     rainbow: bool,
     message: Option<&str>,
+    text: Option<&TextFrame>,
 ) {
     screen.back.fill(BLANK);
     let (width, _) = rain.size();
@@ -119,31 +173,65 @@ pub fn compose(
     let cells = rain.cells();
     for (i, cell) in cells.iter().enumerate().filter(|(_, c)| c.bright > 0.0) {
         let (x, y) = (i % width, i / width);
-        screen.put(
-            x,
-            y,
-            Glyph {
-                ch: cell.glyph,
-                rgb: trail_rgb(base(x), cell.bright),
-                bold: false,
-            },
-        );
+        let rgb = trail_rgb(base(x), cell.bright);
+        screen.put(x, y, Glyph::new(cell.glyph, rgb, false));
     }
     for (x, y) in rain.heads() {
         let ch = cells[y * width + x].glyph;
-        screen.put(
-            x,
-            y,
-            Glyph {
-                ch,
-                rgb: head_rgb(base(x)),
-                bold: true,
-            },
-        );
+        screen.put(x, y, Glyph::new(ch, head_rgb(base(x)), true));
+    }
+    if let Some(text) = text {
+        overlay_text(screen, text, base);
     }
     if let Some(message) = message {
         overlay_message(screen, message);
     }
+}
+
+/// The `-F` box: 3 rows centred vertically, full width except 2 cells of rain on each
+/// side. The rain inside is dimmed; text starts after 2 cells of padding. The cursor
+/// takes the rain colour of its column: a block while idle, an underline while typing.
+fn overlay_text(screen: &mut Screen, frame: &TextFrame, base: impl Fn(usize) -> [u8; 3]) {
+    let (width, height) = (screen.width, screen.height());
+    if width < 10 || height < 3 {
+        return;
+    }
+    let y0 = height / 2 - 1;
+    for y in y0..y0 + 3 {
+        for glyph in &mut screen.back[y * width + 2..y * width + width - 2] {
+            glyph.rgb = scale(glyph.rgb, BOX_DIM);
+        }
+    }
+    let y = y0 + 1;
+    let rgb = [(255.0 * frame.level.clamp(0.0, 1.0)).round() as u8; 3];
+    let mut x = 4;
+    for &ch in &frame.text[..frame.shown] {
+        if ch != ' ' {
+            screen.put(x, y, Glyph::new(ch, rgb, true));
+            if char_width(ch) == 2 {
+                screen.put(x + 1, y, Glyph::new(WIDE_TAIL, rgb, true));
+            }
+        }
+        x += char_width(ch);
+    }
+    if frame.cursor {
+        let bright = base(x);
+        let glyph = match frame.scramble {
+            Some((ch, lightness)) => Glyph {
+                ul: Some(bright),
+                ..Glyph::new(ch, scale(bright, lightness), false)
+            },
+            None => Glyph {
+                bg: bright,
+                ..BLANK
+            },
+        };
+        screen.put(x, y, glyph);
+    }
+}
+
+fn scale(rgb: [u8; 3], k: f32) -> [u8; 3] {
+    rgb.map(|c| (f32::from(c) * k).round() as u8)
 }
 
 /// Three-row box centred on screen, clipped to fit, like cmatrix -M.
@@ -162,11 +250,7 @@ fn overlay_message(screen: &mut Screen, message: &str) {
             let glyph = if ch == ' ' {
                 BLANK
             } else {
-                Glyph {
-                    ch,
-                    rgb: MESSAGE_RGB,
-                    bold: true,
-                }
+                Glyph::new(ch, MESSAGE_RGB, true)
             };
             screen.put(x0 + dx, y0 + dy, glyph);
         }
@@ -217,18 +301,17 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    fn row(screen: &Screen, y: usize) -> String {
+        screen.back[y * screen.width..(y + 1) * screen.width]
+            .iter()
+            .map(|g| g.ch)
+            .collect()
+    }
+
     #[test]
     fn unchanged_frame_writes_nothing() {
         let mut screen = Screen::new(10, 3);
-        screen.put(
-            4,
-            1,
-            Glyph {
-                ch: 'ﾊ',
-                rgb: GREEN,
-                bold: false,
-            },
-        );
+        screen.put(4, 1, Glyph::new('ﾊ', GREEN, false));
         let first = flush(&mut screen);
         assert!(first.starts_with(BEGIN_FRAME) && first.ends_with(END_FRAME));
         assert!(first.contains("\x1b[2J") && first.contains("\x1b[2;5H\x1b[22;38;2;0;255;65mﾊ"));
@@ -239,15 +322,7 @@ mod tests {
     fn only_changed_cells_are_sent() {
         let mut screen = Screen::new(10, 3);
         flush(&mut screen);
-        screen.put(
-            9,
-            2,
-            Glyph {
-                ch: 'Z',
-                rgb: GREEN,
-                bold: true,
-            },
-        );
+        screen.put(9, 2, Glyph::new('Z', GREEN, true));
         assert_eq!(
             flush(&mut screen),
             "\x1b[?2026h\x1b[3;10H\x1b[1;38;2;0;255;65mZ\x1b[?2026l"
@@ -260,16 +335,62 @@ mod tests {
     fn adjacent_cells_share_cursor_and_pen() {
         let mut screen = Screen::new(4, 1);
         flush(&mut screen);
-        let g = Glyph {
-            ch: '1',
-            rgb: GREEN,
-            bold: false,
-        };
-        screen.put(1, 0, g);
-        screen.put(2, 0, Glyph { ch: '2', ..g });
+        screen.put(1, 0, Glyph::new('1', GREEN, false));
+        screen.put(2, 0, Glyph::new('2', GREEN, false));
         assert_eq!(
             flush(&mut screen),
             "\x1b[?2026h\x1b[1;2H\x1b[22;38;2;0;255;65m12\x1b[?2026l"
+        );
+    }
+
+    #[test]
+    fn background_is_set_and_restored() {
+        let mut screen = Screen::new(4, 1);
+        flush(&mut screen);
+        let cursor = Glyph { bg: GREEN, ..BLANK };
+        screen.put(1, 0, cursor);
+        assert_eq!(
+            flush(&mut screen),
+            "\x1b[?2026h\x1b[1;2H\x1b[48;2;0;255;65m \x1b[?2026l"
+        );
+        screen.put(1, 0, BLANK);
+        screen.put(2, 0, cursor);
+        assert_eq!(
+            flush(&mut screen),
+            "\x1b[?2026h\x1b[1;2H\x1b[48;2;0;0;0m \x1b[48;2;0;255;65m \x1b[?2026l"
+        );
+    }
+
+    #[test]
+    fn underline_is_set_and_cleared() {
+        let mut screen = Screen::new(3, 1);
+        flush(&mut screen);
+        let typing = Glyph {
+            ul: Some(GREEN),
+            ..Glyph::new('Z', [64; 3], false)
+        };
+        screen.put(1, 0, typing);
+        assert_eq!(
+            flush(&mut screen),
+            "\x1b[?2026h\x1b[1;2H\x1b[22;38;2;64;64;64;4;58:2::0:255:65mZ\x1b[?2026l"
+        );
+        screen.put(1, 0, Glyph::new('a', [255; 3], true));
+        assert_eq!(
+            flush(&mut screen),
+            "\x1b[?2026h\x1b[1;2H\x1b[1;38;2;255;255;255;24ma\x1b[?2026l"
+        );
+    }
+
+    #[test]
+    fn wide_character_tail_is_not_sent() {
+        let mut screen = Screen::new(5, 1);
+        flush(&mut screen);
+        screen.put(1, 0, Glyph::new('漢', GREEN, false));
+        screen.put(2, 0, Glyph::new(WIDE_TAIL, GREEN, false));
+        screen.put(3, 0, Glyph::new('x', GREEN, false));
+        assert_eq!(
+            flush(&mut screen),
+            "\x1b[?2026h\x1b[1;2H\x1b[22;38;2;0;255;65m漢x\x1b[?2026l"
         );
     }
 
@@ -295,14 +416,86 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (3, 1), (40, 10)] {
             let rain = Rain::new(w, h, movie_glyphs(), Rng::new(3));
             let mut screen = Screen::new(w, h);
-            compose(&mut screen, &rain, GREEN, false, Some("Wake up, Neo\t"));
+            compose(
+                &mut screen,
+                &rain,
+                GREEN,
+                false,
+                Some("Wake up, Neo\t"),
+                None,
+            );
             flush(&mut screen);
         }
         let rain = Rain::new(20, 5, movie_glyphs(), Rng::new(3));
         let mut screen = Screen::new(20, 5);
-        compose(&mut screen, &rain, GREEN, false, Some("Neo"));
-        let row: String = screen.back[2 * 20..3 * 20].iter().map(|g| g.ch).collect();
-        assert_eq!(row, "        Neo         ");
+        compose(&mut screen, &rain, GREEN, false, Some("Neo"), None);
+        assert_eq!(row(&screen, 2), "        Neo         ");
+    }
+
+    #[test]
+    fn text_box_layout() {
+        let rain = Rain::new(20, 5, movie_glyphs(), Rng::new(3));
+        let mut screen = Screen::new(20, 5);
+        let text: Vec<char> = "a 漢b".chars().collect();
+        let mut frame = TextFrame {
+            text: &text,
+            shown: 3,
+            scramble: Some(('Z', 0.5)),
+            cursor: true,
+            level: 1.0,
+        };
+        compose(&mut screen, &rain, GREEN, false, None, Some(&frame));
+        // 2 rain + 2 padding, "a", space, wide character, then the cursor.
+        assert_eq!(row(&screen, 2), format!("    a 漢\0Z{}", " ".repeat(11)));
+        let a = screen.back[2 * 20 + 4];
+        assert_eq!((a.rgb, a.bold, a.bg, a.ul), ([255; 3], true, BLACK, None));
+        // Typing: half-lightness rain colour, underlined in the full rain colour.
+        let typing = screen.back[2 * 20 + 8];
+        assert_eq!(
+            (typing.rgb, typing.ul, typing.bg),
+            ([0, 128, 33], Some(GREEN), BLACK)
+        );
+
+        frame.scramble = None;
+        compose(&mut screen, &rain, GREEN, false, None, Some(&frame));
+        let idle = screen.back[2 * 20 + 8];
+        assert_eq!(
+            (idle.ch, idle.bg, idle.ul),
+            (' ', GREEN, None),
+            "block cursor"
+        );
+    }
+
+    #[test]
+    fn text_box_dims_rain_and_fits_any_size() {
+        let mut rain = Rain::new(30, 9, movie_glyphs(), Rng::new(4));
+        for _ in 0..300 {
+            rain.update(1.0 / 60.0);
+        }
+        let text: Vec<char> = "x".chars().collect();
+        let frame = TextFrame {
+            text: &text,
+            shown: 0,
+            scramble: None,
+            cursor: false,
+            level: 1.0,
+        };
+        let mut plain = Screen::new(30, 9);
+        compose(&mut plain, &rain, GREEN, false, None, None);
+        let mut boxed = Screen::new(30, 9);
+        compose(&mut boxed, &rain, GREEN, false, None, Some(&frame));
+        for (i, (p, b)) in plain.back.iter().zip(&boxed.back).enumerate() {
+            let (x, y) = (i % 30, i / 30);
+            let inside = (3..6).contains(&y) && (2..28).contains(&x);
+            let dimmed = p.rgb.map(|c| (f32::from(c) * BOX_DIM).round() as u8);
+            assert_eq!(b.rgb, if inside { dimmed } else { p.rgb }, "cell {x},{y}");
+        }
+        for (w, h) in [(0, 0), (9, 9), (10, 2), (10, 3), (1, 50)] {
+            let rain = Rain::new(w, h, movie_glyphs(), Rng::new(1));
+            let mut screen = Screen::new(w, h);
+            compose(&mut screen, &rain, GREEN, false, None, Some(&frame));
+            flush(&mut screen);
+        }
     }
 
     #[test]
@@ -322,7 +515,7 @@ mod tests {
         let mut screen = Screen::new(33, 7);
         for i in 0..600 {
             rain.update(1.0 / 60.0);
-            compose(&mut screen, &rain, GREEN, i % 2 == 0, None);
+            compose(&mut screen, &rain, GREEN, i % 2 == 0, None, None);
             flush(&mut screen);
         }
         assert!(screen.back.iter().any(|g| g.bold), "heads drawn");

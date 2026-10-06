@@ -6,8 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type Handle = *mut core::ffi::c_void;
 
-const STD_INPUT_HANDLE: u32 = -10i32 as u32;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+const OPEN_EXISTING: u32 = 3;
 
 const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
 const ENABLE_LINE_INPUT: u32 = 0x0002;
@@ -75,6 +80,16 @@ const _: () = assert!(size_of::<ScreenBufferInfo>() == 22);
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetStdHandle(std_handle: u32) -> Handle;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: *mut core::ffi::c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
+    fn CloseHandle(handle: Handle) -> i32;
     fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
     fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
     fn GetConsoleScreenBufferInfo(handle: Handle, info: *mut ScreenBufferInfo) -> i32;
@@ -113,19 +128,32 @@ pub struct Console {
 
 impl Console {
     pub fn open() -> io::Result<Self> {
-        let (input, output) = unsafe {
-            (
-                GetStdHandle(STD_INPUT_HANDLE),
-                GetStdHandle(STD_OUTPUT_HANDLE),
+        let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        let mut output_mode = 0;
+        if unsafe { GetConsoleMode(output, &mut output_mode) } == 0 {
+            return Err(io::Error::other("stdout must be a console"));
+        }
+        // CONIN$ is the console's keyboard even when stdin is a pipe (`-F -`).
+        let name: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+        let input = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                core::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
             )
         };
-        let (mut input_mode, mut output_mode) = (0, 0);
-        let attached = unsafe {
-            GetConsoleMode(input, &mut input_mode) != 0
-                && GetConsoleMode(output, &mut output_mode) != 0
-        };
-        if !attached {
-            return Err(io::Error::other("stdin and stdout must be a console"));
+        if input == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut input_mode = 0;
+        if unsafe { GetConsoleMode(input, &mut input_mode) } == 0 {
+            let err = io::Error::last_os_error();
+            unsafe { CloseHandle(input) };
+            return Err(err);
         }
         let mut console = Self {
             input,
@@ -204,6 +232,7 @@ impl Drop for Console {
             SetConsoleCtrlHandler(Some(on_ctrl), 0);
             SetConsoleMode(self.input, self.input_mode);
             SetConsoleMode(self.output, self.output_mode);
+            CloseHandle(self.input);
         }
     }
 }

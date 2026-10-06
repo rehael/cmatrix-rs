@@ -16,8 +16,10 @@ Releases are built by GitHub Actions from version tags; see [docs/RELEASING.md](
 ## Usage
 
 ```text
-cmatrix [-hrsV] [--ascii] [-C color] [-M message] [-u delay]
+cmatrix [-hrsV] [--ascii] [-C color] [-F file | -M message] [-u delay]
   -C color    green (default), red, blue, yellow, cyan, magenta, white
+  -F file     type the file's lines one by one in a box over the rain, repeating;
+              '-' reads stdin
   -M message  show a message in the centre of the screen
   -r          rainbow mode
   -s          screensaver: exit on the first key press
@@ -26,6 +28,26 @@ cmatrix [-hrsV] [--ascii] [-C color] [-M message] [-u delay]
 ```
 
 Keys: `q`, `Esc`, `Ctrl+C` quit; `p` pause; `r` rainbow; `0`-`9` speed; `!` red, `@` green, `#` yellow, `$` blue, `%` magenta, `^` cyan, `&` white.
+
+Examples: `cmatrix -F neo.txt`, `type neo.txt | cmatrix -F -`.
+
+### Typed text (`-F`)
+
+1. Rain only, until drops have passed the middle row in half the lanes.
+2. A 3-row box appears in the middle of the screen. It spans the full width except 2 cells of rain on each side. The rain inside is dimmed to 25 %.
+3. A block cursor in the rain colour blinks (300 ms on, 300 ms off) for 5 s, 2 cells in from the box edge.
+4. The line is typed at 50 ms per character. The cursor becomes an underline in the rain colour; above it, the cell flickers through rain glyphs at random lightness of the rain colour. Then the character settles in bold white and the cursor moves on. Spaces flicker too and end blank.
+5. The cursor disappears and the line fades to black over 5 s.
+6. The block cursor blinks for 1 s, then the next line is typed (back to step 4).
+7. After the last line has faded, the box disappears. After 10 s of rain the sequence restarts at step 2.
+
+Text handling:
+
+- Lines longer than the screen width minus 9 cells are wrapped at spaces; words that do not fit are split. Each piece is typed as its own line. After a resize the text is re-wrapped and the current line starts over.
+- UTF-8, with invalid bytes replaced. Tabs become 4 spaces. Control characters, combining marks and zero-width characters are dropped, so text should use composed characters (the norm on Windows). Blank lines are skipped.
+- CJK characters and common emoji take 2 cells, based on a built-in approximation of Unicode East Asian Width.
+- `-F -` reads stdin to the end before starting and fails if nothing is piped in. Keys are read from the console (`CONIN$`), so they work with piped input.
+- Below 10 columns or 3 rows the box is not shown and the sequence waits until the window grows. `p` pauses the sequence; `0`-`9` change only the rain speed. `-F` and `-M` cannot be combined.
 
 ## Behaviour
 

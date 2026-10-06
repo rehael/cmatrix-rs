@@ -97,6 +97,18 @@ impl Rain {
         })
     }
 
+    /// Fraction of lanes with a lit cell at or below `row`.
+    pub fn reach(&self, row: usize) -> f32 {
+        if self.lanes.is_empty() {
+            return 0.0;
+        }
+        let lit = |lane: usize| {
+            (row..self.height).any(|y| self.cells[y * self.width + lane * 2].bright > 0.0)
+        };
+        let hit = (0..self.lanes.len()).filter(|&lane| lit(lane)).count();
+        hit as f32 / self.lanes.len() as f32
+    }
+
     /// Keeps whatever overlaps the new size, so resizing does not restart the rain.
     /// At startup lanes begin empty and fill from the top; lanes added by a resize
     /// start mid-fall, so a grown window has no empty region.
@@ -325,5 +337,15 @@ mod tests {
         r.update(100.0);
         r.update(0.0);
         assert!(r.heads().all(|(x, y)| x < 10 && y < 10));
+    }
+
+    #[test]
+    fn reach_grows_as_rain_falls() {
+        let mut r = rain(80, 24);
+        assert_eq!(r.reach(12), 0.0);
+        run(&mut r, 10.0);
+        assert!(r.reach(12) >= 0.5, "reach {}", r.reach(12));
+        assert_eq!(rain(0, 0).reach(0), 0.0);
+        assert_eq!(rain(5, 3).reach(10), 0.0);
     }
 }

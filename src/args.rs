@@ -2,8 +2,10 @@
 //! and values attached (`-u2`) or separate (`-u 2`).
 
 pub const USAGE: &str = "\
-Usage: cmatrix [-hrsV] [--ascii] [-C color] [-M message] [-u delay]
+Usage: cmatrix [-hrsV] [--ascii] [-C color] [-F file | -M message] [-u delay]
   -C color    green (default), red, blue, yellow, cyan, magenta, white
+  -F file     type the file's lines one by one in a box over the rain, repeating;
+              '-' reads stdin
   -M message  show a message in the centre of the screen
   -r          rainbow mode
   -s          screensaver: exit on the first key press
@@ -31,6 +33,8 @@ pub struct Options {
     pub rgb: [u8; 3],
     pub rainbow: bool,
     pub message: Option<String>,
+    /// `-F` source; "-" is stdin.
+    pub text_file: Option<String>,
     pub screensaver: bool,
     pub delay: u8,
     pub ascii: bool,
@@ -42,6 +46,7 @@ impl Default for Options {
             rgb: COLORS[0].2,
             rainbow: false,
             message: None,
+            text_file: None,
             screensaver: false,
             delay: 4,
             ascii: false,
@@ -79,7 +84,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 'V' => return Ok(Command::Version),
                 'r' => opts.rainbow = true,
                 's' => opts.screensaver = true,
-                'C' | 'M' | 'u' => {
+                'C' | 'F' | 'M' | 'u' => {
                     let attached = &flags[i + flag.len_utf8()..];
                     let value = match attached {
                         "" => args
@@ -89,6 +94,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                     };
                     match flag {
                         'C' => opts.rgb = color(&value)?,
+                        'F' => opts.text_file = Some(value),
                         'M' => opts.message = Some(value),
                         _ => opts.delay = delay(&value)?,
                     }
@@ -97,6 +103,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                 _ => return Err(format!("unknown option -{flag}")),
             }
         }
+    }
+    if opts.message.is_some() && opts.text_file.is_some() {
+        return Err("-F and -M cannot be combined".into());
     }
     Ok(Command::Run(opts))
 }
@@ -143,6 +152,21 @@ mod tests {
     }
 
     #[test]
+    fn text_file() {
+        for (args, file) in [
+            (&["-F", "neo.txt"][..], "neo.txt"),
+            (&["-F", "-"], "-"),
+            (&["-F-"], "-"),
+            (&["-rFneo.txt"], "neo.txt"),
+        ] {
+            let Ok(Command::Run(o)) = run(args) else {
+                panic!("{args:?} rejected");
+            };
+            assert_eq!(o.text_file.as_deref(), Some(file));
+        }
+    }
+
+    #[test]
     fn help_and_version() {
         assert_eq!(run(&["-h"]), Ok(Command::Help));
         assert_eq!(run(&["--help"]), Ok(Command::Help));
@@ -159,6 +183,8 @@ mod tests {
             &["foo"],
             &["-"],
             &["--bogus"],
+            &["-F"],
+            &["-F", "a.txt", "-M", "hi"],
         ] {
             assert!(run(bad).is_err(), "{bad:?} accepted");
         }

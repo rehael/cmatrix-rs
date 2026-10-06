@@ -8,8 +8,9 @@ mod console;
 mod rain;
 mod render;
 mod rng;
+mod typer;
 
-use std::io;
+use std::io::{self, IsTerminal, Read};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +20,7 @@ use console::Console;
 use rain::Rain;
 use render::Screen;
 use rng::Rng;
+use typer::Typer;
 
 const FRAME: Duration = Duration::from_micros(16_667);
 /// Longest simulated step, so a stalled frame does not make drops jump.
@@ -50,13 +52,25 @@ fn main() -> ExitCode {
 }
 
 fn run(mut opts: Options) -> io::Result<()> {
-    let console = Console::open()?;
-    let (width, height) = console.size()?;
     let glyphs = if opts.ascii {
         rain::ascii_glyphs()
     } else {
         rain::movie_glyphs()
     };
+    // Read before the console switches to raw mode, so errors print normally.
+    let mut typer = match &opts.text_file {
+        Some(path) => {
+            let text = read_text(path)?;
+            let typer = Typer::new(&text, glyphs.clone(), Rng::from_time());
+            Some(typer.ok_or_else(|| io::Error::other(format!("{path}: no text to show")))?)
+        }
+        None => None,
+    };
+    let console = Console::open()?;
+    let (width, height) = console.size()?;
+    if let Some(typer) = &mut typer {
+        typer.set_screen_width(width);
+    }
     let mut rain = Rain::new(width, height, glyphs, Rng::from_time());
     let mut screen = Screen::new(width, height);
     let mut out = io::stdout().lock();
@@ -90,11 +104,18 @@ fn run(mut opts: Options) -> io::Result<()> {
         if size != rain.size() {
             rain.resize(size.0, size.1);
             screen.resize(size.0, size.1);
+            if let Some(typer) = &mut typer {
+                typer.set_screen_width(size.0);
+            }
         }
         let dt = now.duration_since(last).as_secs_f32().min(MAX_STEP);
         last = now;
         if !paused {
             rain.update(dt * speed_factor(opts.delay));
+            if let Some(typer) = &mut typer {
+                let ready = typer.waiting() && rain.reach(size.1 / 2) >= 0.5;
+                typer.update(dt, ready);
+            }
         }
         render::compose(
             &mut screen,
@@ -102,6 +123,7 @@ fn run(mut opts: Options) -> io::Result<()> {
             opts.rgb,
             opts.rainbow,
             opts.message.as_deref(),
+            typer.as_ref().and_then(Typer::frame).as_ref(),
         );
         screen.flush(&mut out)?;
 
@@ -109,6 +131,22 @@ fn run(mut opts: Options) -> io::Result<()> {
             thread::sleep(rest);
         }
     }
+}
+
+/// The `-F` source as text; invalid UTF-8 is replaced.
+fn read_text(path: &str) -> io::Result<String> {
+    let bytes = if path == "-" {
+        let mut stdin = io::stdin();
+        if stdin.is_terminal() {
+            return Err(io::Error::other("-F - needs text piped to stdin"));
+        }
+        let mut bytes = Vec::new();
+        stdin.read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(path).map_err(|e| io::Error::other(format!("{path}: {e}")))?
+    };
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Delay 4 (the cmatrix default) is 1x; 0 is ~1.6x, 10 is ~0.14x.
