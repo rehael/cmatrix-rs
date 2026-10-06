@@ -1,5 +1,7 @@
 # cmatrix-rs
 
+![cmatrix-rs in Windows Terminal: rain with the -F box typing a line](docs/cover.png)
+
 Matrix digital rain for Windows Terminal. No dependencies.
 
 Inspired by [cmatrix](https://github.com/astyfoo/cmatrix) by Chris Allegretta, Abishek V Ashok and Xylia Allegretta. This is a separate Rust implementation; it contains no cmatrix code or data.
